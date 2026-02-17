@@ -109,7 +109,10 @@ def _get_param_rrefs(expert_rref):
 def run_master(world_size, input_dim=784, hidden_dim=256, output_dim=10, num_experts=4, top_k=2):
     transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = datasets.FashionMNIST("./data", train=True, download=True, transform=transform)
+    test_dataset = datasets.FashionMNIST("./data", train=False, download=True, transform=transform)
+
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
 
     # Get expert references
     expert_rrefs = [rpc.remote(f"worker{i+1}", RemoteExpert, args=(input_dim, hidden_dim, output_dim))
@@ -126,7 +129,13 @@ def run_master(world_size, input_dim=784, hidden_dim=256, output_dim=10, num_exp
     optimizer = DistributedOptimizer(torch.optim.Adam, param_rrefs, lr=1e-3)
     criterion = nn.CrossEntropyLoss()
 
-    for epoch in range(2):
+    # =======================
+    # Training + Evaluation
+    # =======================
+    for epoch in range(5):
+        model.train()
+        total_loss = 0
+
         for data, target in tqdm(train_loader, desc=f"Epoch {epoch+1}", ncols=100):
             data = data.to("cpu")
             target = target.to("cpu")
@@ -136,7 +145,31 @@ def run_master(world_size, input_dim=784, hidden_dim=256, output_dim=10, num_exp
                 loss = criterion(output, target)
                 dist_autograd.backward(context_id, [loss])
                 optimizer.step(context_id)
-            print(f"Epoch {epoch+1}, loss = {loss.item():.4f}")
+
+            total_loss += loss.item()
+
+        print(f"\nEpoch {epoch+1} Training Loss: {total_loss / len(train_loader):.4f}")
+
+        # =======================
+        # Evaluation step
+        # =======================
+        model.eval()
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for data, target in tqdm(test_loader, desc="Evaluating", ncols=100):
+                data = data.to("cpu")
+                target = target.to("cpu")
+
+                output = model(data)
+                preds = output.argmax(dim=1)
+
+                correct += (preds == target).sum().item()
+                total += target.size(0)
+
+        accuracy = 100 * correct / total
+        print(f"✅ Epoch {epoch+1} Test Accuracy: {accuracy:.2f}%\n")
 
 
 # ================================================================
